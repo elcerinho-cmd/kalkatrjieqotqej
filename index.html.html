@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Balistički Kalkulator PWA</title>
+<meta name="theme-color" content="#0f172a">
+<style>
+body{font-family:system-ui,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:12px}
+h1{font-size:1.25rem;margin-bottom:.5rem}
+h2{font-size:1.05rem;margin-top:1rem}
+label{display:block;margin-top:.6rem;font-size:.9rem}
+input,select{width:100%;padding:9px;margin-top:4px;border-radius:8px;border:none;font-size:.95rem}
+button{margin-top:1rem;width:100%;padding:12px;font-size:1rem;border-radius:10px;border:none;background:#38bdf8;color:#020617;font-weight:700}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.result{margin-top:.8rem;background:#020617;padding:10px;border-radius:10px;font-size:.9rem}
+canvas{margin-top:1rem;background:#020617;border-radius:12px;width:100%;aspect-ratio:2/1}
+.note{font-size:.75rem;color:#94a3b8}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<h1>Balistički kalkulator</h1>
+<div class="note">Zero referenca • MIL / MOA • Centerfire / Rimfire</div>
+
+<h2>Vrsta oružja</h2>
+<select id="fireType" onchange="fireTypeChange()">
+  <option value="centerfire">CENTERFIRE</option>
+  <option value="rimfire">RIMFIRE (.22)</option>
+</select>
+
+<div id="common">
+<h2>Upucavanje</h2>
+<div class="grid">
+<label>Zero (m)<input id="zero" type="number" value="100"></label>
+<label>Cilj (m)<input id="target" type="number" value="300"></label>
+</div>
+
+<h2>Atmosfera</h2>
+<div class="grid">
+<label>Temperatura (°C)<input id="temp" type="number" value="15"></label>
+<label>Tlak (hPa)<input id="press" type="number" value="1013"></label>
+</div>
+
+<h2>Optika</h2>
+<div class="grid">
+<label>Jedinice<select id="units" onchange="unitChange()"><option value="mil">MIL</option><option value="moa">MOA</option></select></label>
+<label id="clickWrap">Klik<select id="click"><option value="0.25">1/4 MOA</option><option value="0.125">1/8 MOA</option></select></label>
+</div>
+</div>
+
+<div id="centerfire">
+<h2>Kalibar</h2>
+<select id="caliber"></select>
+
+<h2>Metak</h2>
+<div class="grid">
+<label>Težina (gr)<input id="mass" type="number" value="140"></label>
+<label>BC<input id="bc" type="number" step="0.01" value="0.48"></label>
+</div>
+<label>Muzzle velocity (m/s)<input id="mv" type="number" placeholder="Automatski ako je prazno"></label>
+
+<h2>Punjenje / cijev</h2>
+<div class="grid">
+<label>Punjenje (gr)<input id="powder" type="number" value="42"></label>
+<label>Cijev (cm)<input id="barrel" type="number" value="60"></label>
+</div>
+<label>Twist (in/turn)<input id="twist" type="number" value="8"></label>
+</div>
+
+<div id="rimfire" class="hidden">
+<h2>.22 Rimfire</h2>
+<div class="grid">
+<label>Vrsta<select id="rimType"><option value="330">Standard / Subsonic</option><option value="380">High Velocity</option></select></label>
+<label>BC<input id="rimBC" type="number" step="0.01" value="0.13"></label>
+</div>
+<div class="grid">
+<label>Težina (gr)<input id="rimMass" type="number" value="40"></label>
+<label>Cijev (cm)<input id="rimBarrel" type="number" value="50"></label>
+</div>
+<label>Twist (in/turn)<input id="rimTwist" type="number" value="16"></label>
+</div>
+
+<button onclick="run()">Izračunaj</button>
+<canvas id="plot"></canvas>
+<div id="out" class="result"></div>
+
+<script>
+const CALS={
+ '223':{name:'.223 Rem',d:0.0057,baseV:920,bc:0.40},
+ '243':{name:'.243 Win',d:0.00617,baseV:900,bc:0.45},
+ '65cm':{name:'6.5 Creedmoor',d:0.0067,baseV:820,bc:0.62},
+ '270':{name:'.270 Win',d:0.00686,baseV:900,bc:0.48},
+ '308':{name:'.308 Win',d:0.00782,baseV:800,bc:0.47},
+ '300wm':{name:'.300 Win Mag',d:0.00782,baseV:905,bc:0.53},
+ '8x57':{name:'8x57 IS',d:0.00822,baseV:760,bc:0.48},
+ '93x62':{name:'9.3x62',d:0.0093,baseV:720,bc:0.50}
+};
+const calSel=document.getElementById('caliber');
+Object.keys(CALS).forEach(k=>{const o=document.createElement('option');o.value=k;o.text=CALS[k].name;calSel.appendChild(o)});
+
+function fireTypeChange(){
+ const f=fireType.value;
+ document.getElementById('centerfire').classList.toggle('hidden',f==='rimfire');
+ document.getElementById('rimfire').classList.toggle('hidden',f==='centerfire');
+}
+window.onload=()=>unitChange();
+
+function unitChange(){
+ const isMOA = units.value==='moa';
+ document.getElementById('clickWrap').style.display = isMOA ? 'block' : 'none';
+}
+
+function rho(T,p){return (p*100)/(287.05*(T+273.15));}
+
+function run(){
+ const g=9.81,dt=0.001;
+ const zeroD=+document.getElementById('zero').value;
+ const targetD=+document.getElementById('target').value;
+ const T=+document.getElementById('temp').value;
+ const p=+document.getElementById('press').value;
+ const r=rho(T,p);
+ let v0,bcVal,m,A;
+
+ if(fireType.value==='centerfire'){
+  const cal=CALS[calSel.value];
+  bcVal=+document.getElementById('bc').value || cal.bc;
+  m=+document.getElementById('mass').value*0.0000648;
+  A=Math.PI*(cal.d/2)**2;
+  const mvInput=document.getElementById('mv').value;
+  if(mvInput){
+    v0=+mvInput;
+  } else {
+    v0=cal.baseV*(0.9+0.1*(+document.getElementById('powder').value/40))*(+document.getElementById('barrel').value/60);
+  }
+ } else {
+  bcVal=+document.getElementById('rimBC').value;
+  m=+document.getElementById('rimMass').value*0.0000648;
+  A=Math.PI*(0.0056/2)**2;
+  v0=+document.getElementById('rimType').value*(+document.getElementById('rimBarrel').value/50);
+ }
+
+ function simulate(angle,dist){
+  let x=0,y=0,vx=v0*Math.cos(angle),vy=v0*Math.sin(angle);
+  while(x<dist && y>-20){
+   const v=Math.hypot(vx,vy);
+   const D=0.5*r*bcVal*A*v*v;
+   vx+=(-D*vx/v/m)*dt;
+   vy+=(-g-D*vy/v/m)*dt;
+   x+=vx*dt;
+   y+=vy*dt;
+  }
+  return y;
+ }
+
+ let bestAng=0,bestErr=1e9;
+ for(let a=-0.005;a<=0.01;a+=0.00005){
+  const y=simulate(a,zeroD);
+  if(Math.abs(y)<bestErr){bestErr=Math.abs(y);bestAng=a}
+ }
+
+ let x=0,y=0,vx=v0*Math.cos(bestAng),vy=v0*Math.sin(bestAng);
+ const traj=[];
+ while(x<=targetD && y>-20){
+  traj.push({x,y});
+  const v=Math.hypot(vx,vy);
+  const D=0.5*r*bcVal*A*v*v;
+  vx+=(-D*vx/v/m)*dt;
+  vy+=(-g-D*vy/v/m)*dt;
+  x+=vx*dt;
+  y+=vy*dt;
+ }
+
+ draw(traj,zeroD,targetD);
+ const hit=traj.find(p=>p.x>=targetD)||traj[traj.length-1];
+ const drop=-hit.y;
+ const unit=units.value;
+ let corr;
+ if(unit==='mil') corr=drop/targetD*1000;
+ else corr=(drop/targetD)*(180/Math.PI)*60;
+ const clickVal=unit==='mil'?0.1:+document.getElementById('click').value;
+ const clicks=Math.round(corr/clickVal);
+ document.getElementById('out').innerHTML=
+  `Brzina na ustima: ${v0.toFixed(1)} m/s<br>`+
+  `Pad: ${(drop*100).toFixed(1)} cm<br>`+
+  `Korekcija: ${corr.toFixed(2)} ${unit.toUpperCase()}<br>`+
+  `Klikovi: ${Math.abs(clicks)} (${clicks>0?'GORE':'DOLJE'})`;
+}
+
+function draw(tr,zero,target){
+ const c=plot,ctx=c.getContext('2d');
+ const dpr=window.devicePixelRatio||1;
+ const w=c.clientWidth,h=c.clientWidth*.5;
+ c.width=w*dpr;c.height=h*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);
+ ctx.clearRect(0,0,w,h);
+ const maxY=Math.max(...tr.map(p=>Math.abs(p.y)))*1.3||1;
+ const maxX=Math.max(zero,target);
+ const tx=x=>x/maxX*w,ty=y=>h/2-(y/maxY)*(h/2);
+ ctx.strokeStyle='#1e293b';ctx.font='11px system-ui';
+ for(let m=0;m<=maxX;m+=50){const x=tx(m);ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();ctx.fillText(`${m} m`,x+2,h-4)}
+ ctx.strokeStyle='#38bdf8';ctx.lineWidth=2;ctx.beginPath();tr.forEach((p,i)=>{i?ctx.lineTo(tx(p.x),ty(p.y)):ctx.moveTo(tx(p.x),ty(p.y))});ctx.stroke();
+ ctx.fillStyle='#22c55e';ctx.fillRect(tx(zero)-1,0,2,h);
+ ctx.fillStyle='#ef4444';ctx.fillRect(tx(target)-1,0,2,h);
+}
+</script>
+</body>
+</html>
